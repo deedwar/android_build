@@ -51,11 +51,19 @@ Usage:  ota_from_target_files [flags] input_target_files output_ota_package
 
   -a  (--aslr_mode)  <on|off>
       Specify whether to turn on ASLR for the package (on by default).
-
+  
   -2  (--two_step)
       Generate a 'two-step' OTA package, where recovery is updated
       first, so that any changes made to the system partition are done
       using the new recovery (new kernel, etc.).
+
+  --override_device <device>
+      Override device-specific asserts. Can be a comma-separated list.
+  
+  --no_separate_recovery <boolean>
+      Do not generate recovery image. For devices which do not have a truly
+      separate recovery partition.
+
 
 """
 
@@ -94,6 +102,8 @@ OPTIONS.extra_script = None
 OPTIONS.aslr_mode = True
 OPTIONS.worker_threads = 3
 OPTIONS.two_step = False
+OPTIONS.override_device = 'auto'
+OPTIONS.no_separate_recovery = False
 
 def MostPopularKey(d, default):
   """Given a dict, return the key corresponding to the largest
@@ -347,7 +357,10 @@ def SignOutput(temp_zip_name, output_zip_name):
 
 
 def AppendAssertions(script, info_dict):
-  device = GetBuildProp("ro.product.device", info_dict)
+  if OPTIONS.override_device == "auto":
+    device = GetBuildProp("ro.product.device", info_dict)
+  else:
+    device = OPTIONS.override_device
   script.AssertDevice(device)
 
 
@@ -455,7 +468,8 @@ def WriteFullOTAPackage(input_zip, output_zip):
   #       set up system to update recovery partition on first boot
   #    complete script normally (allow recovery to mark itself finished and reboot)
 
-  recovery_img = common.GetBootableImage("recovery.img", "recovery.img",
+  if not OPTIONS.no_separate_recovery:
+    recovery_img = common.GetBootableImage("recovery.img", "recovery.img",
                                          OPTIONS.input_tmp, "RECOVERY")
   if OPTIONS.two_step:
     if not OPTIONS.info_dict.get("multistage_support", None):
@@ -487,7 +501,8 @@ else if get_stage("%(bcb_dev)s", "stage") == "3/3" then
 
   script.FormatPartition("/system")
   script.Mount("/system")
-  script.UnpackPackageDir("recovery", "/system")
+  if not OPTIONS.no_separate_recovery:
+    script.UnpackPackageDir("recovery", "/system")
   script.UnpackPackageDir("system", "/system")
 
   symlinks = CopySystemFiles(input_zip, output_zip)
@@ -495,7 +510,10 @@ else if get_stage("%(bcb_dev)s", "stage") == "3/3" then
 
   boot_img = common.GetBootableImage("boot.img", "boot.img",
                                      OPTIONS.input_tmp, "BOOT")
-  MakeRecoveryPatch(OPTIONS.input_tmp, output_zip, recovery_img, boot_img)
+  if not OPTIONS.no_separate_recovery:
+    recovery_img = common.GetBootableImage("recovery.img", "recovery.img",
+                                           OPTIONS.input_tmp, "RECOVERY")
+    MakeRecoveryPatch(OPTIONS.input_tmp, output_zip, recovery_img, boot_img)
 
   Item.GetMetadata(input_zip)
   Item.Get("system").SetPermissions(script)
@@ -682,12 +700,15 @@ def WriteIncrementalOTAPackage(target_zip, source_zip, output_zip):
   updating_boot = (not OPTIONS.two_step and
                    (source_boot.data != target_boot.data))
 
-  source_recovery = common.GetBootableImage(
-      "/tmp/recovery.img", "recovery.img", OPTIONS.source_tmp, "RECOVERY",
-      OPTIONS.source_info_dict)
-  target_recovery = common.GetBootableImage(
-      "/tmp/recovery.img", "recovery.img", OPTIONS.target_tmp, "RECOVERY")
-  updating_recovery = (source_recovery.data != target_recovery.data)
+  if not OPTIONS.no_separate_recovery:
+    source_recovery = common.GetBootableImage(
+        "/tmp/recovery.img", "recovery.img", OPTIONS.source_tmp, "RECOVERY",
+        OPTIONS.source_info_dict)
+    target_recovery = common.GetBootableImage(
+        "/tmp/recovery.img", "recovery.img", OPTIONS.target_tmp, "RECOVERY")
+    updating_recovery = (source_recovery.data != target_recovery.data)
+  else:
+    updating_recovery = False
 
   # Here's how we divide up the progress bar:
   #  0.1 for verifying the start state (PatchCheck calls)
@@ -888,7 +909,7 @@ else
     script.Print("Unpacking new files...")
     script.UnpackPackageDir("system", "/system")
 
-  if updating_recovery:
+  if updating_recovery and not OPTIONS.no_separate_recovery:
     script.Print("Unpacking new recovery...")
     script.UnpackPackageDir("recovery", "/system")
 
@@ -968,6 +989,10 @@ def main(argv):
       OPTIONS.worker_threads = int(a)
     elif o in ("-2", "--two_step"):
       OPTIONS.two_step = True
+    elif o in ("--override_device"):
+      OPTIONS.override_device = a
+    elif o in ("--no_separate_recovery"):
+      OPTIONS.no_separate_recovery = bool(a.lower() == 'true')
     else:
       return False
     return True
@@ -982,7 +1007,9 @@ def main(argv):
                                               "extra_script=",
                                               "worker_threads=",
                                               "aslr_mode=",
-                                              "two_step",
+                                              "two_step",					      
+					      "override_device=",
+                                              "no_separate_recovery=",
                                               ],
                              extra_option_handler=option_handler)
 
